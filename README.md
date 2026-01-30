@@ -1,2 +1,2 @@
 # BumpBlaster5000
-Code for controlling Smaug (Bruker 2P) opto-stimulation based on behavior
+Code for controlling Sam G3 based on behavior
