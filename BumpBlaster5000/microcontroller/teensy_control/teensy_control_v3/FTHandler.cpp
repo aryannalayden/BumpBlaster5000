@@ -22,7 +22,7 @@ void FTHandler::init(int f_pin, TwoWire* w1, uint8_t addr1, TwoWire* w2,
 
 void FTHandler::recv_data() { // receive Fictrac data
     
-    static byte ndx = 0; // buffer index
+    static uint8_t ndx = 0; // buffer index AL changed because byte was ambiguous in arduino
     static char delimiter = ','; // column delimiter
     static char endline = '\n'; // endline character
     static char curr_byte; // current byte
