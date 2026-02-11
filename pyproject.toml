@@ -1,6 +1,6 @@
 [build-system]
-requires = ["setuptools>=61.0", "wheel"]
-build-backend = "setuptools.build_meta"
+requires = ["hatchling"]
+build-backend = "hatchling.build"
 
 [project]
 name = "BumpBlaster5000"
@@ -20,9 +20,9 @@ classifiers = [
 dependencies = [
     "numpy",
     "scipy",
-    "pyqt5",
     "pyserial",
     "pyqtgraph",
+    "PySide6",
     "ipython",
     "pandas",
     "pywin32; sys_platform == 'win32'",
@@ -30,9 +30,8 @@ dependencies = [
     "pillow",
 ]
 
-[tool.setuptools.packages.find]
-where = ["."]
-include = ["BumpBlaster5000*"]
+[tool.hatch.build.targets.wheel]
+packages = ["BumpBlaster5000"]
 
 [tool.uv]
-dev-dependencies = []
+managed = true

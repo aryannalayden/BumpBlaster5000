@@ -146,7 +146,7 @@ class SharedArray:
 
 class CircularFlatBuffer:
     
-    def __init__(self,length, dtype = np.float, name = 'deque'):
+    def __init__(self,length, dtype = float, name = 'deque'):
       
         self._creator = None
         

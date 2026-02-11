@@ -18,8 +18,8 @@ from .. import shared_memory, params
 
 
 
-FICTRAC_PATH = r'C:\Users\fisherlab\Documents\FicTrac211\fictrac.exe'
-CONFIG_PATH = r'C:\Users\fisherlab\Documents\FicTrac211\config.txt'
+FICTRAC_PATH = r'C:\Users\fisherlab\Documents\FicTrac 2.1.1\fictrac.exe'
+CONFIG_PATH = r'C:\Users\fisherlab\Documents\FicTrac 2.1.1\config.txt'
 
 class FicTracSubProcess:
     '''
