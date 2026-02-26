@@ -63,7 +63,7 @@ class FTHandler {
         bool closed_loop = true;
         
         FTHandler(Stream& srl_ref);
-        void init(int f_pin, TwoWire* w1, uint8_t addr1, TwoWire* w2, 
+        void init(int f_pin, TwoWire* w1, uint8_t addr1, TwoWire* w, 
                     uint8_t addr2);
         
         void process_srl_data();

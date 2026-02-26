@@ -36,29 +36,31 @@ void setup() {
     pump_trig.init(5, 500, true); // initialize pin, invert pin
   
 
-    ft.init(2, &Wire1, 0x62, &Wire1, 0x63); // initialize dacs
+    ft.init(2, &Wire1, 0x60, &Wire, 0x62);  //  DACs for heading (on Wire1 bus- 0x60) + index (on Wire bus - 0x62)
 
     BKSERIAL.begin(115200); // hardware serial
 }
 
 void yield() {} // get rid of hidden arduino yield function
 
-FASTRUN void loop() { // FASTRUN teensy keyword
+FASTRUN void loop() {
 
-    
     ft.process_srl_data(); // read fictrac data
 
     ss.read_state(); // read state machine serial port
     if (ss.new_cmd) { // if new state
         
+        digitalWrite(13, !digitalRead(13));  // <-- ADD THIS LINE
+        
         execute_state();
-        ss.new_cmd=false;
+        ss.new_cmd = false;
     }
 
     ft.update_dacs(); // update DAC pins to control arena
 
     check_pins(); // flip triggers down, check stimulation timers
 }
+
 
 
 

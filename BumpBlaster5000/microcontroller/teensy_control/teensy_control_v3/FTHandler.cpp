@@ -4,7 +4,7 @@
 FTHandler::FTHandler(Stream& srl_ref): srl(srl_ref) {    
     }
 
-void FTHandler::init(int f_pin, TwoWire* w1, uint8_t addr1, TwoWire* w2, 
+void FTHandler::init(int f_pin, TwoWire* w1, uint8_t addr1, TwoWire* w, 
                     uint8_t addr2) {
     // initialize frame pin
     frame_pin = f_pin;
@@ -16,7 +16,7 @@ void FTHandler::init(int f_pin, TwoWire* w1, uint8_t addr1, TwoWire* w2,
     i_addr = addr2;
     // initialize dacs
     heading_dac.begin(h_addr, w1);
-    index_dac.begin(i_addr, w2);    
+    index_dac.begin(i_addr, w);    
     
 }
 
