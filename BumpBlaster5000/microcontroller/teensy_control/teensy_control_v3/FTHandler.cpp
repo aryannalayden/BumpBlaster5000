@@ -1,3 +1,58 @@
+// * FTHandler.cpp - handles receiving and parsing FicTrac data, updating DAC outputs for closed-loop control, 
+// * and implementing auto-blanking based on motion thresholds 
+
+// File purpose:
+// Implements the FTHandler class, which receives and parses FicTrac serial data,
+// updates heading and index DAC outputs, and applies optional motion-threshold-based
+// auto-blanking of the visual bar.
+//
+// Main responsibilities:
+// - read incoming FicTrac data one column at a time from the serial stream
+// - parse key FicTrac columns such as frame number, heading, delta rotations, and delta timestamp
+// - compute heading values used for closed-loop scene control
+// - manage direct and delayed updates to heading and index DAC outputs
+// - compute a rolling motion metric (mm/s) from FicTrac rotational velocities
+// - automatically set the index DAC to visible or blank values *when auto-blanking is enabled*
+//
+// Key additions / special logic:
+// - recv_data() reads FicTrac serial input incrementally and marks when a full column has been received
+// - update_col() interprets the current FicTrac column and stores relevant values in FTHandler state
+// - heading is parsed from FicTrac column 17 and used for closed-loop heading control
+// *- delta rotations from FicTrac columns 2, 3, and 4 plus delta timestamp from column 24
+// *  are used to compute a motion metric in mm/s
+// - a single scalar "motion metric" is defined as the max velocity across axes
+// -  a rolling window is used to compute mean motion to reduce noise
+// - update_index_from_motion_threshold() applies the user-selected single-threshold rule:
+//     - mean motion above threshold -> set index to visible value
+//     - mean motion at or below threshold -> set index to blank value
+//
+// IMPORTANT: Threshold is NOT hardcoded here
+// - although a default threshold exists, this file does NOT assume it is fixed
+// - the value of motion_threshold_mm_per_s is updated at runtime via:
+//     FTHandler::configure_auto_blank(...)
+// - this function is called from teensy_control_v3.ino in response to Python commands
+// - therefore, changing the threshold in Python is sufficient to change behavior
+//   without modifying or recompiling this file
+// 
+// Practical implication:
+// - create multiple experimental protocols in Python with different thresholds
+// - each protocol sends its own threshold to the Teensy before/during the experiment
+// - FTHandler will use the most recently received threshold value
+// 
+// Relationships to other files:
+// - FTHandler.h declares the class and parameters used here
+// - teensy_control_v3.ino:
+//     - parses incoming commands from Python
+//     - calls configure_auto_blank() to update threshold and related parameters
+// - Python/BumpBlaster:
+//     - defines experimental protocols
+//     - sends threshold + enable/disable commands to Teensy
+//
+// In short:
+// This file performs the actual computation: it converts FicTrac motion into a
+// smoothed motion metric and uses a runtime-configurable threshold to decide
+// whether the visual bar should be visible or blank.
+
 #include "Arduino.h"
 #include "FTHandler.h"
 
@@ -7,8 +62,9 @@ FTHandler::FTHandler(Stream& srl_ref): srl(srl_ref) {
 void FTHandler::init(int f_pin, TwoWire* w1, uint8_t addr1, TwoWire* w, 
                     uint8_t addr2) {
     // initialize frame pin
-    frame_pin = f_pin;
+    // * pinMode and digitalWrite moved to init to ensure pin is set up before processing any FicTrac data which cues on frame pin toggling
 
+    frame_pin = f_pin;
     pinMode(frame_pin,OUTPUT);
     digitalWriteFast(frame_pin,LOW);
 
@@ -28,6 +84,9 @@ void FTHandler::recv_data() { // receive Fictrac data
     static char curr_byte; // current byte
 
     static int _col_tmp;
+
+//  * reading from serial until no more data, parsing into columns based on delimiter and endline characters
+//  * and storing in chars buffer, cueing new_data when a full column is received
 
     if (srl.available() > 0) { // cannot use while(Serial.available()) because Teensy will read all 
         curr_byte = srl.read(); 
@@ -52,6 +111,13 @@ void FTHandler::recv_data() { // receive Fictrac data
         }
     }
 }
+//  * what update col does:
+//  * checks which column of FicTrac data is being received (tracked by col variable that increments with each new column
+//  * and resets after reaching num_cols)
+//  * parses relevant columns (e.g., heading, delta rotations, delta timestamp) and stores in FTHandler variables
+//  * for use in closed-loop control and auto-blanking logic
+//  * changes made: added parsing of delta rotation and delta timestamp columns
+//  * and added logic to compute motion metric and update index based on motion threshold
 
     void FTHandler::update_col() {
 
@@ -67,8 +133,13 @@ void FTHandler::recv_data() { // receive Fictrac data
                 current_frame = atoi(chars);
                 break;
 
+// * parse heading value from FicTrac and store in ft_heading variable, applying heading offset and wrapping to [0, 2pi) if in closed-loop mode.
+// * new_heading flag is set to cue update_dacs() to update the DAC output for heading.
+// * frame pin is flipped low at the start of update_col() and will be flipped high at the start of the next frame (case 0)
+// * to provide a timing signal for when new FicTrac data is being processed.
+
             case 17: // heading 
-                // flip ft pin low 
+                // flip ft pin low
                 digitalWriteFast(frame_pin,LOW);
 
                 // update heading pin
@@ -77,14 +148,66 @@ void FTHandler::recv_data() { // receive Fictrac data
                     new_heading = true;
                 }
                 break;
+
+// AL added case for XYZ rotation and delta timestamp for auto-blanking
+
+            case 2: // FicTrac col 2: delta rotation x (camera coordinates)
+                delta_rotation_x_cam = atof(chars);
+                break;
+
+            case 3: // FicTrac col 3: delta rotation y (camera coordinates)
+                delta_rotation_y_cam = atof(chars);
+                break;
+
+            case 4: // FicTrac col 4: delta rotation z (camera coordinates)
+                delta_rotation_z_cam = atof(chars);
+                break;
+
+            case 24: // FicTrac col 24: delta timestep since last frame (seconds)
+                delta_timestamp_sec = atof(chars);
+
+        // *compute motion metric and update index if auto-blanking enabled
+        // *1e-6 added to avoid divide-by-zero in case of very small delta timestamps which can occur when FicTrac is running at high frame rates
+        
+                if (delta_timestamp_sec > 1e-6) {
+                    // Convert delta rotations to angular velocities (rad/s-ish) then to mm/s
+                    double velocity_x_mm_per_s =
+                        fabs(delta_rotation_x_cam / delta_timestamp_sec) * ball_radius_mm;
+
+                    double velocity_y_mm_per_s =
+                        fabs(delta_rotation_y_cam / delta_timestamp_sec) * ball_radius_mm;
+
+                    double velocity_z_mm_per_s =
+                        fabs(delta_rotation_z_cam / delta_timestamp_sec) * ball_radius_mm;
+
+                    // reduce to one scalar: "Any motion" metric = maximum component velocity
+                    float motion_metric_mm_per_s =
+                        (float)std::max(velocity_x_mm_per_s, // max(...) : if any axis shows enough movement, count the fly as moving
+                            std::max(velocity_y_mm_per_s, velocity_z_mm_per_s));
+                            
+            // *helpers are used to add motion metric samples to a rolling window and compute the mean motion metric over recent frames
+            // *and if auto-blanking is enabled, the index DAC is set to blank or visible values based on whether mean motion metric exceeds the threshold
+
+                    // Add to rolling mean window and update index if enabled
+                    push_motion_metric_sample(motion_metric_mm_per_s);
+                    update_index_from_motion_threshold();
+                }
+                break;
         }
     }
-    
+
+// what execute_state does:
+//  * executes commands received from Python interface (cued by new_cmd flag in StateSerial)
+//  * commands are parsed in StateSerial::read_state() and stored in cmd (command ID) and val_arr (command parameters)
+//  * execute_state uses a switch-case statement to determine which command to execute based on cmd
+//  * cmd under execute_state() in teensy_control_v3.ino
+//  * for example, case 6 sets the heading DAC value based on val_arr[0] which is parsed from the Python command
+//  * and case 7 sets the index DAC value based on val_arr[0]
     void FTHandler::execute_col() {
         FTHandler::recv_data(); 
         if (new_data == true) {
             FTHandler::update_col();
-            col = (col+1) % num_cols; // keep track of columns in fictrack  
+            col = (col+1) % num_cols; // keep track of columns in FicTrac data  
             new_data = false;
         }
     }
@@ -115,7 +238,7 @@ void FTHandler::recv_data() { // receive Fictrac data
             }
         }
 
-////          set dac vals
+//          set dac vals
         if (new_heading){
           heading_dac.setVoltage(int(double(max_dac_val) * heading/2.0/PI), false);
           new_heading = false;
@@ -126,14 +249,48 @@ void FTHandler::recv_data() { // receive Fictrac data
         }
 
     }
+// * set_heading and set_index are called from execute_state() in teensy_control_v3.ino when commands are received from Python interface (GUI)
+// * to set heading and index DAC values directly (e.g., for open-loop control or testing)
 
     void FTHandler::set_heading(double h) {
+        SerialUSB2.print("DEBUG FTHandler::set_heading received h = "); // debug
+        SerialUSB2.println(h, 6); // debug
+
         heading = fmod(h, 2.0*PI);
+
+        SerialUSB2.print("DEBUG FTHandler::set_heading stored heading = "); // debug
+        SerialUSB2.println(heading, 6); // debug
+
         new_heading = true;
     }
 
+    //void FTHandler::set_heading(double h) {
+        //SerialUSB2.print("DEBUG FTHandler::set_heading received h = ");
+        //SerialUSB2.println(h, 6);
+
+        // Clamp to valid 12-bit range
+        //if (h < 0.0) h = 0.0;
+        //if (h > 4095.0) h = 4095.0;
+
+        // Map 0..4095 -> 0..2pi
+        //heading = (h / 4096.0) * 2.0 * PI;
+
+        //SerialUSB2.print("DEBUG FTHandler::set_heading stored heading = ");
+        //SerialUSB2.println(heading, 6);
+
+        //new_heading = true;
+    //}
+
+
     void FTHandler::set_index(int i) {
+        SerialUSB2.print("DEBUG FTHandler::set_index received i = "); // debug
+        SerialUSB2.println(i); // debug
+
         index = std::max(std::min(i, max_dac_val),0);
+
+        SerialUSB2.print("DEBUG FTHandler::set_index stored index = "); // debug
+        SerialUSB2.println(index); // debug
+        
         new_index = true;
     }
 
@@ -161,4 +318,57 @@ void FTHandler::recv_data() { // receive Fictrac data
         index_countdown.delay = t;
         index_countdown.timestamp = millis();
         index_countdown.val = std::max(std::min(i, max_dac_val),0);
+    }
+
+    // AL blanking added
+    void FTHandler::set_auto_blank_enabled(bool enabled) {
+        auto_blank_enabled = enabled;
+    }
+
+    void FTHandler::configure_auto_blank(double radius_mm,
+                                        double threshold_mm_per_s, // setting motion threshold from Python through StateSerial ss(SerialUSB1) reading commands from python interface in teensy_control_v3.ino
+                                        int visible_index_dac_value,
+                                        int blank_index_dac_value) {
+        ball_radius_mm = radius_mm;
+        motion_threshold_mm_per_s = threshold_mm_per_s;
+        index_visible_dac_value = std::max(std::min(visible_index_dac_value, max_dac_val), 0);
+        index_blank_dac_value   = std::max(std::min(blank_index_dac_value,   max_dac_val), 0);
+
+        // Reset rolling window so enabling starts cleanly
+        motion_window_head = 0;
+        motion_window_count = 0;
+        motion_metric_sum = 0.0;
+    }
+
+    void FTHandler::push_motion_metric_sample(float motion_metric_mm_per_s) {
+        if (motion_window_count < MOTION_WINDOW_SAMPLES) {
+            motion_metric_window[motion_window_head] = motion_metric_mm_per_s;
+            motion_metric_sum += motion_metric_mm_per_s;
+            motion_window_count++;
+        } else {
+            // Overwrite oldest sample (ring buffer)
+            motion_metric_sum -= motion_metric_window[motion_window_head];
+            motion_metric_window[motion_window_head] = motion_metric_mm_per_s;
+            motion_metric_sum += motion_metric_mm_per_s;
+        }
+
+        motion_window_head = (motion_window_head + 1) % MOTION_WINDOW_SAMPLES;
+    }
+
+    float FTHandler::mean_motion_metric_mm_per_s() const {
+        if (motion_window_count == 0) return 0.0f;
+        return (float)(motion_metric_sum / (double)motion_window_count);
+    }
+
+    void FTHandler::update_index_from_motion_threshold() {
+        if (!auto_blank_enabled) return;
+
+        float mean_motion = mean_motion_metric_mm_per_s();
+
+        // Single-threshold logic (your preference)
+        if (mean_motion > (float)motion_threshold_mm_per_s) {
+            set_index(index_visible_dac_value);
+        } else {
+            set_index(index_blank_dac_value);
+        }
     }

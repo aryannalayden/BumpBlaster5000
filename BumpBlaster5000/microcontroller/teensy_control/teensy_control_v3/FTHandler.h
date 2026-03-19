@@ -1,3 +1,45 @@
+// * FTHandler interface for parsing FicTrac serial data, tracking heading/index state,
+// * and performing optional motion-threshold-based auto-blanking of the visual bar.
+//
+// Main responsibilities:
+// - define all state variables for heading, index, and FicTrac parsing
+// - store auto-blanking configuration parameters (radius, threshold, DAC values)
+// - declare helper functions for motion metric calculation and threshold logic
+// - expose public methods used by Teensy command interface (setters + configuration)
+//
+// Key additions / special logic:
+// - includes runtime-configurable auto-blanking parameters:
+//     - ball_radius_mm
+//     - motion_threshold_mm_per_s
+//     - index_visible_dac_value
+//     - index_blank_dac_value
+// - maintains a rolling window of motion samples for computing mean motion
+// - exposes:
+//     - set_auto_blank_enabled(bool)
+//     - configure_auto_blank(...)
+//   which allow parameters (including threshold) to be updated at runtime
+//
+// IMPORTANT: Threshold control is runtime-configurable
+// - the motion threshold is NOT fixed at compile time
+// - the value defined here is only a default
+// - the actual threshold used during experiments is set by Python via
+//   configure_auto_blank(), routed through teensy_control_v3.ino
+// - this allows different experimental protocols to use different thresholds
+//   without modifying or reflashing the Teensy firmware
+//
+// Relationships to other files:
+// - FTHandler.cpp implements all methods declared here
+// - teensy_control_v3.ino receives commands from Python and calls:
+//     - set_auto_blank_enabled()
+//     - configure_auto_blank()
+// - Python/BumpBlaster experimental protocols send threshold + parameters
+//   at the start of each experiment
+
+// In short:
+// This file defines the data structures and interface for FicTrac-driven control
+// and motion-based auto-blanking, with all key parameters (including threshold)
+// configurable at runtime from Python
+
 #ifndef FTHANDLER_H
 #define FTHANDLER_H
 
@@ -37,7 +79,37 @@ class FTHandler {
     dac_countdown index_countdown;
 
     double heading_offset=0;
+    // -------------------------
+    // Auto-blanking based on FicTrac motion (optional / opt-in)
+    // -------------------------
+    bool auto_blank_enabled = false;
 
+    // Configuration (units explicitly in mm and mm/s)
+    double ball_radius_mm = 4.5;                 // ball radius
+    double motion_threshold_mm_per_s = 0.1;      // chosen threshold. default value in the class, can be updated from Python side via configure_auto_blank() 
+
+    // Index output values (DAC counts 0..4095)
+    // Using 0 for "visible" and 2048 for "blank" ( > midpoint ~2048 )
+    int index_visible_dac_value = 0;
+    int index_blank_dac_value   = 2048; // change to 2048? anything above 5 volts will blank.
+
+    // FicTrac parsed motion columns (camera coordinates)
+    double delta_rotation_x_cam = 0.0;           // col 2
+    double delta_rotation_y_cam = 0.0;           // col 3
+    double delta_rotation_z_cam = 0.0;           // col 4
+    double delta_timestamp_sec  = 0.0;           // col 24
+
+    // Rolling window for motion metric (mean over last N frames)
+    static const int MOTION_WINDOW_SAMPLES = 100;
+    float motion_metric_window[MOTION_WINDOW_SAMPLES];
+    int motion_window_head = 0;
+    int motion_window_count = 0;
+    double motion_metric_sum = 0.0;
+
+    // Helpers
+    void push_motion_metric_sample(float motion_metric_mm_per_s);
+    float mean_motion_metric_mm_per_s() const;
+    void update_index_from_motion_threshold();
     
     int frame_pin;
 
@@ -81,6 +153,12 @@ class FTHandler {
         void set_heading_on_delay(int t, double h);
 
         void set_index_on_delay(int t, int i );
+// AL blanking added
+        void set_auto_blank_enabled(bool enabled);
+        void configure_auto_blank(double radius_mm,
+                                double threshold_mm_per_s,
+                                int visible_index_dac_value,
+                                int blank_index_dac_value);
 
 
 };

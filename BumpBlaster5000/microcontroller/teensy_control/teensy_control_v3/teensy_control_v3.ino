@@ -1,3 +1,52 @@
+// File purpose:
+// Top-level Teensy control file that coordinates communication between Python,
+// FicTrac input, DAC output control, and hardware triggers for scanning/opto/pump.
+//
+// Main responsibilities:
+// - initialize hardware triggers, DAC communication, and serial interfaces
+// - continuously read FicTrac data through FTHandler
+// - continuously read command packets from Python through StateSerial
+// - route Python commands to the correct FTHandler / PointRunner actions
+// - update DAC outputs and trigger states each loop
+//
+// Key additions / special logic:
+// - FTHandler ft(Serial) handles FicTrac parsing and heading/index DAC control
+// - StateSerial ss(SerialUSB1) receives commands from the Python/BumpBlaster interface
+// - execute_state() is the main command dispatcher that maps ss.cmd values to actions
+// - case 16 was added for runtime auto-blanking control:
+//     - val_arr[0] = ball_radius_mm
+//     - val_arr[1] = motion_threshold_mm_per_s
+//     - val_arr[2] = visible_index_dac_value
+//     - val_arr[3] = blank_index_dac_value
+//     - val_arr[4] = enable flag (0 or 1)
+// - case 16 calls:
+//     - ft.configure_auto_blank(...)
+//     - ft.set_auto_blank_enabled(...)
+//   which means the Teensy updates the threshold and related parameters at runtime
+//   based on values sent from Python
+//
+// IMPORTANT: Auto-blanking threshold is runtime-configurable
+// - the threshold is NOT fixed in FTHandler.cpp once compiled
+// - Python can send a new threshold at the start of an experiment using command 16
+// - this file receives that command and passes the new threshold into FTHandler
+// - therefore, changing the threshold in the Python experimental protocol is sufficient;
+//   no C++ edits or reflashing are needed just to test a different threshold
+// - however, each protocol should explicitly send its desired threshold/configuration,
+//   otherwise FTHandler will continue using its current/default values
+//
+// Relationships to other files:
+// - FTHandler.h declares the FTHandler interface and stored state
+// - FTHandler.cpp implements FicTrac parsing, motion metric computation,
+//   DAC updates, and threshold-based blanking logic
+// - Python/BumpBlaster sends commands over serial, which are parsed by StateSerial
+//   and executed here in execute_state()
+//
+// *In short:
+// *This file is the central command-and-control layer on the Teensy: it connects
+// *Python commands to FTHandler behavior, keeps FicTrac and DAC updates running,
+// *and enables experiment-by-experiment control of auto-blanking parameters
+// *(including motion threshold) without changing firmware logic.
+
 // State reading variables
 #include <cstring>
 #include "Trigger.h"
@@ -36,7 +85,7 @@ void setup() {
     pump_trig.init(5, 500, true); // initialize pin, invert pin
   
 
-    ft.init(2, &Wire1, 0x60, &Wire, 0x62);  //  DACs for heading (on Wire1 bus- 0x60) + index (on Wire bus - 0x62)
+    ft.init(2, &Wire1, 0x62, &Wire, 0x62);  //  DACs for heading (on Wire1 bus- 0x62) + index (on Wire bus - 0x62)
 
     BKSERIAL.begin(115200); // hardware serial
 }
@@ -107,10 +156,14 @@ void execute_state() {
             break;
 
         case 6: // set heading_dac value
+            SerialUSB2.print("DEBUG execute_state case 6 | heading input = "); // debug
+            SerialUSB2.println(ss.val_arr[0], 6); // debug
             ft.set_heading(ss.val_arr[0]);
             break;
 
         case 7: // set index_dac value
+            SerialUSB2.print("DEBUG execute_state case 7 | index input = "); // debug
+            SerialUSB2.println(ss.val_arr[0], 6); // debug
             ft.set_index(ss.val_arr[0]); 
             break;
 
@@ -148,6 +201,20 @@ void execute_state() {
 
         case 15: // rotate scene by set amount in radians
             ft.rotate_scene(ss.val_arr[0]);
+            break;
+
+        case 16: // AL configure and enable/disable auto-blanking
+            // Parameters:
+            // val_arr[0] = ball_radius_mm (e.g., 4.5)
+            // val_arr[1] = threshold_mm_per_s (e.g., 0.1)
+            // val_arr[2] = visible_index_dac_value (e.g., 0)
+            // val_arr[3] = blank_index_dac_value   (e.g., 4095)
+            // val_arr[4] = enabled (0 or 1)
+            ft.configure_auto_blank(ss.val_arr[0],
+                                    ss.val_arr[1],
+                                    (int)ss.val_arr[2],
+                                    (int)ss.val_arr[3]);
+            ft.set_auto_blank_enabled((bool)ss.val_arr[4]);
             break;
    }
 }
