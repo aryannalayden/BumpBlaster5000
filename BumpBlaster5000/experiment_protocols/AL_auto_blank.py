@@ -36,7 +36,30 @@ motion-based blanking on for the trial, then turns it off and restores the bar.
 """
 
 from time import sleep
+# ----------------------------
+# Teensy command IDs
+# ----------------------------
+SET_INDEX_CMD_ID = 7
+AUTO_BLANK_CMD_ID = 16
 
+# ----------------------------
+# Command packet sizes
+# send_cmd format:
+#   <num_params>,<cmd_id>,<param1>,...,<paramN>
+# where num_params counts only the parameters after cmd_id
+# ----------------------------
+SET_INDEX_NUM_PARAMS = 1
+AUTO_BLANK_NUM_PARAMS = 5
+
+# ----------------------------
+# Default index values
+# NOTE:
+# - index DAC is 0-4095
+# - if passed through a gain-of-2 op amp, 4095 corresponds to ~10 V at the panel input
+# - choose index_blank based on empirical panel behavior
+# ----------------------------
+DEFAULT_INDEX_VISIBLE = 0
+DEFAULT_INDEX_BLANK = 4095
 
 def send_cmd(queue, cmd_str: str):
     """Send a raw state-machine command string to the Teensy."""
@@ -47,35 +70,51 @@ def configure_auto_blank(queue,
                          radius_mm: float = 4.5,
                          threshold_mm_per_s: float = 0.1,
                          index_visible: int = 0,
-                         index_blank: int = 2048,
+                         index_blank: int = 4095,
                          enabled: int = 1):
-    """Teensy cmd 16: configure auto-blanking parameters and enable state."""
+
+    """
+    Teensy cmd 16: configure motion-threshold auto-blanking.
+
+    Packet format:
+      <num_params>,<cmd_id>,<radius_mm>,<threshold_mm_per_s>,
+      <index_visible>,<index_blank>,<enabled>
+
+    Parameters sent to Teensy:
+    - radius_mm: treadmill/ball radius used to convert FicTrac rotation to mm/s
+    - threshold_mm_per_s: movement threshold for deciding visible vs blank
+    - index_visible: index DAC value that shows the bar
+    - index_blank: index DAC value that blanks the bar
+    - enabled: 1 = auto-blanking active, 0 = auto-blanking inactive
+    """
     send_cmd(
         queue,
-        f"5,16,{radius_mm},{threshold_mm_per_s},{index_visible},{index_blank},{enabled}"
+        f"{AUTO_BLANK_NUM_PARAMS},{AUTO_BLANK_CMD_ID},"
+        f"{radius_mm},{threshold_mm_per_s},{index_visible},{index_blank},{enabled}"
     )
 
 
 def set_index(queue, index_value: int):
-    """Teensy cmd 7: set index DAC."""
-    send_cmd(queue, f"1,7,{int(index_value)}")
+    """Teensy cmd 7: manually set the index DAC."""
+    send_cmd(queue, f"{SET_INDEX_NUM_PARAMS},{SET_INDEX_CMD_ID},{int(index_value)}")
 
 
 def run(queue,
         duration_s: float = 60 * 3,
         radius_mm: float = 4.5,
         threshold_mm_per_s: float = 0.1,
-        index_visible: int = 0,
-        index_blank: int = 2048):
+        index_visible: int = DEFAULT_INDEX_VISIBLE,
+        index_blank: int = DEFAULT_INDEX_BLANK):
     """
     Auto-blanking trial:
-      - start with visible bar
-      - configure and enable auto-blanking
-      - run for duration_s
-      - disable auto-blanking
-      - restore visible bar
+    - set the bar to the visible index before starting
+    - send auto-blanking parameters and enable auto-blanking
+    - wait for the trial duration while Teensy handles blanking in real time
+    - disable auto-blanking at the end of the trial
+    - restore the visible bar index
     """
 
+# Start from a known visible state
     set_index(queue, index_visible)
 
     configure_auto_blank(
@@ -86,9 +125,11 @@ def run(queue,
         index_blank=index_blank,
         enabled=1,
     )
-
+    
+    # Let the trial run while FTHandler applies the motion threshold in real time
     sleep(duration_s)
 
+    # Turn off auto-blanking but keep the same config values explicit
     configure_auto_blank(
         queue,
         radius_mm=radius_mm,
@@ -98,6 +139,7 @@ def run(queue,
         enabled=0,
     )
 
+    # Restore bar to a known visible state after the trial
     set_index(queue, index_visible)
 
     return
