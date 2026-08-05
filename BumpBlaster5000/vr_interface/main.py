@@ -52,8 +52,12 @@ class BumpBlaster(pg_gui.WidgetWindow):
         except serial.SerialException:
             raise Exception("teensy input serial port %s couldn't be open" % self._params['teensy_input_com'])
         self.teensy_input_queue = mp.SimpleQueue()
-        # make sure fictrac starts in closed loop
-        self.teensy_input_queue.put('1,7,0\n'.encode('UTF-8'))
+        # reset Teensy to a known state on startup — the Teensy does not reset when
+        # the GUI restarts, so any auto-blank state from the previous session persists.
+        # send: disable auto-blank (cmd 16, enabled=0), set index visible (cmd 7), closed loop (cmd 5)
+        self.teensy_input_queue.put(b'6,16,4.5,7.0,3.0,0,4095,0\n')  # disable auto-blank
+        self.teensy_input_queue.put(b'1,7,0\n')                        # index visible
+        self.teensy_input_queue.put(b'0,5\n')                          # closed loop
         
 
         ## start thread to read outputs from teensy
@@ -162,8 +166,12 @@ class BumpBlaster(pg_gui.WidgetWindow):
         self.exp_process = launch_multiprocess(self.exp_func, self.teensy_input_queue)
 
     def abort_exp(self):
-        self.teensy_input_queue.put(b'0,11\n')
-   
+        self.teensy_input_queue.put(b'0,11\n')         # abort PointRunner
+        # clean up auto-blank state — kill() is immediate so the experiment's own
+        # cleanup code never runs; send the reset here before killing the process
+        self.teensy_input_queue.put(b'6,16,4.5,7.0,3.0,0,4095,0\n')  # disable auto-blank
+        self.teensy_input_queue.put(b'1,7,0\n')                        # index visible
+        self.teensy_input_queue.put(b'0,5\n')                          # closed loop
         self.exp_process.kill()
         
     def send_heading_val(self):
@@ -256,7 +264,7 @@ class BumpBlaster(pg_gui.WidgetWindow):
         with self.ft_manager._ft_buffer_lock:
             self.cumm_path_plotitem.plot(self.plot_deques['integrated x'].vals, self.plot_deques['integrated y'].vals,
                                          clear=True, _callSync='off')
-        
+
     def plot_heading_hist(self):
 
         with self.ft_manager._ft_buffer_lock:
@@ -291,7 +299,7 @@ class BumpBlaster(pg_gui.WidgetWindow):
         # close remote plotting processes
         self.cumm_path_plotwidget.close()
         self.heading_hist_plotwidget.close()
-        
+
         # disconnect shared memory
         for k, v in self.plot_deques.items():
             v.close()

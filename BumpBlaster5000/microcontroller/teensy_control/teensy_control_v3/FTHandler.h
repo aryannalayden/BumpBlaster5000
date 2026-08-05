@@ -78,6 +78,11 @@ class FTHandler {
     bool new_index;
     dac_countdown index_countdown;
 
+    double integrated_x = 0.0;
+    double integrated_y = 0.0;
+    bool new_intx = false;
+    bool new_inty = false;
+
     double heading_offset=0;
     // -------------------------
     // Auto-blanking based on FicTrac motion (optional / opt-in)
@@ -86,12 +91,18 @@ class FTHandler {
 
     // Configuration (units explicitly in mm and mm/s)
     double ball_radius_mm = 4.5;                 // ball radius
-    double motion_threshold_mm_per_s = 0.1;      // chosen threshold. default value in the class, can be updated from Python side via configure_auto_blank() 
+    // double motion_threshold_mm_per_s = 0.1;  // single-threshold (old). kept for reference; replaced by hysteresis below
+    // Hysteresis thresholds: bar turns ON above threshold_high, blanks below threshold_low.
+    // Dead zone between the two holds current state — prevents fly grooming/micromotion
+    // from flickering the bar. To revert to single-threshold, re-enable the line above,
+    // remove these two, and restore the single-threshold logic in update_index_from_motion_threshold().
+    double motion_threshold_high_mm_per_s = 7.0; // metric must exceed this to show bar (above fly micromotion ~3-5 mm/s)
+    double motion_threshold_low_mm_per_s  = 3.0; // metric must drop below this to blank bar (above FicTrac noise floor ~2 mm/s)
 
     // Index output values (DAC counts 0..4095)
     // Using 0 for "visible" and 2048 for "blank" ( > midpoint ~2048 )
     int index_visible_dac_value = 0;
-    int index_blank_dac_value   = 2048; // change to 2048? anything above 5 volts will blank.
+    int index_blank_dac_value   = 4095; // change to 2048? anything above 5 volts will blank.
 
     // FicTrac parsed motion columns (camera coordinates)
     double delta_rotation_x_cam = 0.0;           // col 2
@@ -100,7 +111,14 @@ class FTHandler {
     double delta_timestamp_sec  = 0.0;           // col 24
 
     // Rolling window for motion metric (mean over last N frames)
-    static const int MOTION_WINDOW_SAMPLES = 100;
+    // Camera runs at ~108 fps. With hysteresis (threshold_high/low in configure_auto_blank)
+    // handling grooming stability, a small window is sufficient for fast response.
+    // Turn-off lag ≈ 0.9 × samples / fps.
+    //
+    // static const int MOTION_WINDOW_SAMPLES = 200; // ~1.7 s lag — stable but sluggish
+    // static const int MOTION_WINDOW_SAMPLES = 108; // ~0.9 s lag — balanced
+    static const int MOTION_WINDOW_SAMPLES = 65;  // ~0.5 s lag — fast; safe with good FicTrac tracking
+    // Note: below ~40, burst tracking errors can spike mean above threshold_high
     float motion_metric_window[MOTION_WINDOW_SAMPLES];
     int motion_window_head = 0;
     int motion_window_count = 0;
@@ -123,6 +141,8 @@ class FTHandler {
 
     Adafruit_MCP4725 heading_dac;
     Adafruit_MCP4725 index_dac;
+    Adafruit_MCP4725 intx_dac;
+    Adafruit_MCP4725 inty_dac;
 
     
     void recv_data();
@@ -135,8 +155,8 @@ class FTHandler {
         bool closed_loop = true;
         
         FTHandler(Stream& srl_ref);
-        void init(int f_pin, TwoWire* w1, uint8_t addr1, TwoWire* w, 
-                    uint8_t addr2);
+        void init(int f_pin, TwoWire* w1, uint8_t addr1, TwoWire* w,
+                    uint8_t addr2, uint8_t intx_addr, uint8_t inty_addr);
         
         void process_srl_data();
         void update_dacs();
@@ -155,8 +175,13 @@ class FTHandler {
         void set_index_on_delay(int t, int i );
 // AL blanking added
         void set_auto_blank_enabled(bool enabled);
+        // old single-threshold signature (kept for reference):
+        // void configure_auto_blank(double radius_mm, double threshold_mm_per_s,
+        //                           int visible_index_dac_value, int blank_index_dac_value);
+        // hysteresis version — takes both a high (turn-on) and low (turn-off) threshold:
         void configure_auto_blank(double radius_mm,
-                                double threshold_mm_per_s,
+                                double threshold_high_mm_per_s,
+                                double threshold_low_mm_per_s,
                                 int visible_index_dac_value,
                                 int blank_index_dac_value);
 

@@ -85,7 +85,7 @@ void setup() {
     pump_trig.init(5, 500, true); // initialize pin, invert pin
   
 
-    ft.init(2, &Wire1, 0x62, &Wire, 0x62);  //  DACs for heading (on Wire1 bus- 0x62) + index (on Wire bus - 0x62)
+    ft.init(2, &Wire1, 0x62, &Wire, 0x62, 0x63, 0x63);  // Wire1: heading(0x62)+intx(0x63)  Wire: index(0x62)+inty(0x63)
 
     BKSERIAL.begin(115200); // hardware serial
 }
@@ -156,15 +156,11 @@ void execute_state() {
             break;
 
         case 6: // set heading_dac value
-            SerialUSB2.print("DEBUG execute_state case 6 | heading input = "); // debug
-            SerialUSB2.println(ss.val_arr[0], 6); // debug
             ft.set_heading(ss.val_arr[0]);
             break;
 
         case 7: // set index_dac value
-            SerialUSB2.print("DEBUG execute_state case 7 | index input = "); // debug
-            SerialUSB2.println(ss.val_arr[0], 6); // debug
-            ft.set_index(ss.val_arr[0]); 
+            ft.set_index(ss.val_arr[0]);
             break;
 
         case 8: // set heading and index dac
@@ -204,17 +200,15 @@ void execute_state() {
             break;
 
         case 16: // AL configure and enable/disable auto-blanking
-            // Parameters:
-            // val_arr[0] = ball_radius_mm (e.g., 4.5)
-            // val_arr[1] = threshold_mm_per_s (e.g., 0.1)
-            // val_arr[2] = visible_index_dac_value (e.g., 0)
-            // val_arr[3] = blank_index_dac_value   (e.g., 4095)
-            // val_arr[4] = enabled (0 or 1)
-            ft.configure_auto_blank(ss.val_arr[0],
-                                    ss.val_arr[1],
-                                    (int)ss.val_arr[2],
-                                    (int)ss.val_arr[3]);
-            ft.set_auto_blank_enabled((bool)ss.val_arr[4]);
+            // old single-threshold call (kept for reference):
+            // ft.configure_auto_blank(ss.val_arr[0], ss.val_arr[1], (int)ss.val_arr[2], (int)ss.val_arr[3]);
+            // hysteresis version: val_arr[1] = threshold_high, val_arr[2] = threshold_low
+            ft.configure_auto_blank(ss.val_arr[0],   // radius_mm
+                                    ss.val_arr[1],   // threshold_high_mm_per_s (turn-on)
+                                    ss.val_arr[2],   // threshold_low_mm_per_s  (turn-off)
+                                    (int)ss.val_arr[3], // visible DAC value
+                                    (int)ss.val_arr[4]); // blank DAC value
+            ft.set_auto_blank_enabled((bool)ss.val_arr[5]);
             break;
    }
 }

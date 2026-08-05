@@ -59,8 +59,8 @@
 FTHandler::FTHandler(Stream& srl_ref): srl(srl_ref) {    
     }
 
-void FTHandler::init(int f_pin, TwoWire* w1, uint8_t addr1, TwoWire* w, 
-                    uint8_t addr2) {
+void FTHandler::init(int f_pin, TwoWire* w1, uint8_t addr1, TwoWire* w,
+                    uint8_t addr2, uint8_t intx_addr, uint8_t inty_addr) {
     // initialize frame pin
     // * pinMode and digitalWrite moved to init to ensure pin is set up before processing any FicTrac data which cues on frame pin toggling
 
@@ -70,10 +70,17 @@ void FTHandler::init(int f_pin, TwoWire* w1, uint8_t addr1, TwoWire* w,
 
     h_addr = addr1;
     i_addr = addr2;
-    // initialize dacs
+    // initialize dacs — setClock must be called AFTER begin() on each bus,
+    // because begin() resets the clock to the 100 kHz default
+    // Wire1: heading (0x62) + intx (intx_addr)
     heading_dac.begin(h_addr, w1);
-    index_dac.begin(i_addr, w);    
-    
+    intx_dac.begin(intx_addr, w1);
+    w1->setClock(400000);
+    // Wire: index (0x62) + inty (inty_addr)
+    index_dac.begin(i_addr, w);
+    inty_dac.begin(inty_addr, w);
+    w->setClock(400000);
+
 }
 
 void FTHandler::recv_data() { // receive Fictrac data
@@ -163,8 +170,18 @@ void FTHandler::recv_data() { // receive Fictrac data
                 delta_rotation_z_cam = atof(chars);
                 break;
 
-            case 24: // FicTrac col 24: delta timestep since last frame (seconds)
-                delta_timestamp_sec = atof(chars);
+            case 15: // FicTrac col 15: integrated x (lab coords, radians)
+                integrated_x = atof(chars);
+                new_intx = true;
+                break;
+
+            case 16: // FicTrac col 16: integrated y (lab coords, radians)
+                integrated_y = atof(chars);
+                new_inty = true;
+                break;
+
+            case 24: // FicTrac col 24: delta timestep since last frame (nanoseconds -> convert to seconds)
+                delta_timestamp_sec = atof(chars) / 1e9;
 
         // *compute motion metric and update index if auto-blanking enabled
         // *1e-6 added to avoid divide-by-zero in case of very small delta timestamps which can occur when FicTrac is running at high frame rates
@@ -247,20 +264,25 @@ void FTHandler::recv_data() { // receive Fictrac data
           index_dac.setVoltage(int(index), false);
           new_index = false;
         }
+        if (new_intx) {
+            double wrapped_x = fmod(integrated_x, 2*PI);
+            if (wrapped_x < 0) wrapped_x += 2*PI;
+            intx_dac.setVoltage(int(double(max_dac_val) * wrapped_x / (2*PI)), false);
+            new_intx = false;
+        }
+        if (new_inty) {
+            double wrapped_y = fmod(integrated_y, 2*PI);
+            if (wrapped_y < 0) wrapped_y += 2*PI;
+            inty_dac.setVoltage(int(double(max_dac_val) * wrapped_y / (2*PI)), false);
+            new_inty = false;
+        }
 
     }
 // * set_heading and set_index are called from execute_state() in teensy_control_v3.ino when commands are received from Python interface (GUI)
 // * to set heading and index DAC values directly (e.g., for open-loop control or testing)
 
     void FTHandler::set_heading(double h) {
-        SerialUSB2.print("DEBUG FTHandler::set_heading received h = "); // debug
-        SerialUSB2.println(h, 6); // debug
-
         heading = fmod(h, 2.0*PI);
-
-        SerialUSB2.print("DEBUG FTHandler::set_heading stored heading = "); // debug
-        SerialUSB2.println(heading, 6); // debug
-
         new_heading = true;
     }
 
@@ -283,14 +305,7 @@ void FTHandler::recv_data() { // receive Fictrac data
 
 
     void FTHandler::set_index(int i) {
-        SerialUSB2.print("DEBUG FTHandler::set_index received i = "); // debug
-        SerialUSB2.println(i); // debug
-
         index = std::max(std::min(i, max_dac_val),0);
-
-        SerialUSB2.print("DEBUG FTHandler::set_index stored index = "); // debug
-        SerialUSB2.println(index); // debug
-        
         new_index = true;
     }
 
@@ -325,12 +340,22 @@ void FTHandler::recv_data() { // receive Fictrac data
         auto_blank_enabled = enabled;
     }
 
+    // old single-threshold version (kept for reference — restore to revert):
+    // void FTHandler::configure_auto_blank(double radius_mm, double threshold_mm_per_s,
+    //                                      int visible_index_dac_value, int blank_index_dac_value) {
+    //     ball_radius_mm = radius_mm;
+    //     motion_threshold_mm_per_s = threshold_mm_per_s;
+    //     index_visible_dac_value = ...; index_blank_dac_value = ...;
+    // }
+    // hysteresis version: takes high (turn-on) and low (turn-off) thresholds separately
     void FTHandler::configure_auto_blank(double radius_mm,
-                                        double threshold_mm_per_s, // setting motion threshold from Python through StateSerial ss(SerialUSB1) reading commands from python interface in teensy_control_v3.ino
+                                        double threshold_high_mm_per_s,
+                                        double threshold_low_mm_per_s,
                                         int visible_index_dac_value,
                                         int blank_index_dac_value) {
         ball_radius_mm = radius_mm;
-        motion_threshold_mm_per_s = threshold_mm_per_s;
+        motion_threshold_high_mm_per_s = threshold_high_mm_per_s; // bar turns ON above this
+        motion_threshold_low_mm_per_s  = threshold_low_mm_per_s;  // bar BLANKS below this
         index_visible_dac_value = std::max(std::min(visible_index_dac_value, max_dac_val), 0);
         index_blank_dac_value   = std::max(std::min(blank_index_dac_value,   max_dac_val), 0);
 
@@ -365,10 +390,18 @@ void FTHandler::recv_data() { // receive Fictrac data
 
         float mean_motion = mean_motion_metric_mm_per_s();
 
-        // Single-threshold logic (your preference)
-        if (mean_motion > (float)motion_threshold_mm_per_s) {
-            set_index(index_visible_dac_value);
-        } else {
-            set_index(index_blank_dac_value);
+        // old single-threshold logic (kept for reference — restore to revert):
+        // float thresh = (float)motion_threshold_mm_per_s;
+        // if (mean_motion > thresh) { set_index(index_visible_dac_value); }
+        // else                      { set_index(index_blank_dac_value);   }
+
+        // hysteresis logic: only change state when metric clearly crosses a threshold.
+        // dead zone between threshold_low and threshold_high holds the current state,
+        // preventing fly grooming / micromotion from flickering the bar.
+        if (mean_motion > (float)motion_threshold_high_mm_per_s) {
+            set_index(index_visible_dac_value); // clearly walking — show bar
+        } else if (mean_motion < (float)motion_threshold_low_mm_per_s) {
+            set_index(index_blank_dac_value);   // clearly stopped — blank bar
         }
+        // else: in dead zone — do nothing, hold current state
     }

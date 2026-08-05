@@ -61,6 +61,34 @@ AUTO_BLANK_NUM_PARAMS = 5
 DEFAULT_INDEX_VISIBLE = 0
 DEFAULT_INDEX_BLANK = 4095
 
+# ----------------------------
+# Tuning guide
+# ----------------------------
+# Two knobs control blanking behavior. Both can be adjusted without reflashing.
+#
+# 1. threshold_mm_per_s  (in run() below)
+#    The speed ABOVE which the bar is visible; BELOW this the bar blanks.
+#    Logic in FTHandler: mean_motion > threshold → VISIBLE, else → BLANK
+#    - Too low  → FicTrac noise (~2 mm/s at 108 fps) always exceeds threshold
+#                 → bar stays VISIBLE even when fly is stopped (never blanks)
+#    - Too high → real walking velocity never exceeds threshold → bar always BLANK
+#    Noise floor at 108 fps with good exposure ≈ 2 mm/s. Threshold must be ABOVE
+#    the noise floor to reliably blank a still ball.
+#    Start at 4.0 mm/s and adjust in 0.5 mm/s steps based on behavior.
+#
+# 2. MOTION_WINDOW_SAMPLES  (in FTHandler.h — requires reflash)
+#    Number of FicTrac frames averaged to compute speed (~108 fps on this setup).
+#    - Too small (e.g. 65)  → faster transitions but variance causes flickering during stillness
+#    - Too large (e.g. 400) → very stable but sluggish (~3.7 s lag to blank after stopping)
+#    200 samples (~1.85 s) gives stable binary behavior: each noisy FicTrac spike
+#    contributes only 0.5% to the mean. Turn-on lag ~290 ms, turn-off lag ~1.6 s.
+#    NOTE: if camera fps changes, rescale — target ~1.85 s (samples = fps × 1.85).
+#
+# Typical workflow:
+#   1. Adjust threshold_mm_per_s until slow walking is captured but stopped = blank.
+#   2. If the transition still flickers, increase MOTION_WINDOW_SAMPLES and reflash.
+# ----------------------------
+
 def send_cmd(queue, cmd_str: str):
     """Send a raw state-machine command string to the Teensy."""
     queue.put((cmd_str + "\n").encode("UTF-8"))
@@ -68,7 +96,7 @@ def send_cmd(queue, cmd_str: str):
 
 def configure_auto_blank(queue,
                          radius_mm: float = 4.5,
-                         threshold_mm_per_s: float = 0.1,
+                         threshold_mm_per_s: float = 0.5,
                          index_visible: int = 0,
                          index_blank: int = 4095,
                          enabled: int = 1):
@@ -100,9 +128,9 @@ def set_index(queue, index_value: int):
 
 
 def run(queue,
-        duration_s: float = 60 * 3,
+        duration_s: float = 60 * 10,
         radius_mm: float = 4.5,
-        threshold_mm_per_s: float = 0.1,
+        threshold_mm_per_s: float = 4.0,  # must be > FicTrac noise floor (~2 mm/s at 108 fps); bar shows when motion > this, blanks when ≤
         index_visible: int = DEFAULT_INDEX_VISIBLE,
         index_blank: int = DEFAULT_INDEX_BLANK):
     """

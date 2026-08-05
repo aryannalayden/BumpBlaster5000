@@ -56,7 +56,7 @@ class WidgetWindow:
         self.cumm_path_plotitem = self.cumm_path_view.pg.PlotItem(title="Cumulative Path")
         self.cumm_path_plotitem._setProxyOptions(deferGetattr=True)
         self.cumm_path_view.setCentralItem(self.cumm_path_plotitem)
-        
+
 
         self.heading_hist_view = pg.widgets.RemoteGraphicsView.RemoteGraphicsView()
         self.heading_hist_view.pg.setConfigOptions(antialias = True)
